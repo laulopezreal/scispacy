@@ -6,7 +6,8 @@ import json
 import spacy
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(os.path.join(__file__, os.pardir))))
-from scispacy.custom_sentence_segmenter import combined_rule_sentence_segmenter
+
+from scispacy.custom_sentence_segmenter import pysbd_sentencizer
 from scispacy.custom_tokenizer import remove_new_lines, combined_rule_tokenizer
 
 def evaluate_sentence_splitting(model_path: str,
@@ -17,7 +18,7 @@ def evaluate_sentence_splitting(model_path: str,
 
     model = spacy.load(model_path)
     if rule_segmenter:
-        model.add_pipe(combined_rule_sentence_segmenter, first=True)
+        model.add_pipe(pysbd_sentencizer, first=True)
     if custom_tokenizer:
         model.tokenizer = combined_rule_tokenizer(model)
 

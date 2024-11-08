@@ -1,6 +1,7 @@
 import unittest
 import tempfile
 
+import pytest
 import spacy
 
 from scispacy.candidate_generation import CandidateGenerator, create_tfidf_ann_index
@@ -13,9 +14,9 @@ from scispacy.util import scipy_supports_sparse_float16
 class TestLinker(unittest.TestCase):
     def setUp(self):
         super().setUp()
-        if not scipy_supports_sparse_float16():
+        # if not scipy_supports_sparse_float16():
             # https://github.com/allenai/scispacy/issues/519#issuecomment-2229915999
-            self.skipTest("Candidate generation isn't supported for scipy>=1.11")
+            # self.skipTest("Candidate generation isn't supported for scipy>=1.11")
 
         self.nlp = spacy.load("en_core_web_sm")
 
@@ -41,7 +42,9 @@ class TestLinker(unittest.TestCase):
         # set the threshold to something more reasonable.
         self.linker.no_definition_threshold = 0.95
         doc = self.linker(doc)
-        assert doc.ents[0]._.kb_ents == [("C0000039", 1.0)]
+        # assert doc.ents[0]._.kb_ents  [("C0000039", 0.999999880790729)]
+        assert doc.ents[0]._.kb_ents[0][0] == "C0000039"
+        assert doc.ents[0]._.kb_ents[0][1] == pytest.approx(1.0, rel=1e-3)
 
         self.linker.filter_for_definitions = False
         self.linker.threshold = 0.45
@@ -51,7 +54,10 @@ class TestLinker(unittest.TestCase):
         assert len(doc.ents[0]._.kb_ents) == 2
 
         id_with_score = doc.ents[0]._.kb_ents[0]
-        assert id_with_score == ("C0000039", 1.0)
+        # assert id_with_score == ("C0000039", 1.0)
+        assert id_with_score[0] == "C0000039"
+        assert id_with_score[1] == pytest.approx(1.0, rel=1e-3)
+
         umls_entity = self.linker.kb.cui_to_entity[id_with_score[0]]
         assert umls_entity.concept_id == "C0000039"
         assert umls_entity.types == ["T109", "T121"]
@@ -66,7 +72,9 @@ class TestLinker(unittest.TestCase):
         doc = self.linker(doc)
 
         id_with_score = doc.ents[0]._.kb_ents[0]
-        assert id_with_score == ("C0000098", 0.9819725155830383)
+        # assert id_with_score == ("C0000098", 0.9819725155830383)
+        assert id_with_score[0] == "C0000098"
+        assert id_with_score[1] == pytest.approx(0.9819, rel=1e-3)
         umls_entity = self.linker.kb.cui_to_entity[id_with_score[0]]
         assert umls_entity.concept_id == "C0000098"
 

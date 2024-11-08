@@ -221,7 +221,7 @@ class AbbreviationDetector:
         return doc
 
     def find_matches_for(
-        self, filtered: List[Tuple[Span, Span]], doc: Doc
+     self, filtered: List[Tuple[Span, Span]], doc: Doc
     ) -> List[Tuple[Span, Set[Span]]]:
         rules = {}
         all_occurences: Dict[Span, Set[Span]] = defaultdict(set)
@@ -229,30 +229,30 @@ class AbbreviationDetector:
         already_seen_short: Set[str] = set()
         for long_candidate, short_candidate in filtered:
             short, long = find_abbreviation(long_candidate, short_candidate)
-            # We need the long and short form definitions to be unique, because we need
-            # to store them so we can look them up later. This is a bit of a
-            # pathalogical case also, as it would mean an abbreviation had been
-            # defined twice in a document. There's not much we can do about this,
-            # but at least the case which is discarded will be picked up below by
-            # the global matcher. So it's likely that things will work out ok most of the time.
-            new_long = long.text not in already_seen_long if long else False
-            new_short = short.text not in already_seen_short
-            if long is not None and new_long and new_short:
-                already_seen_long.add(long.text)
-                already_seen_short.add(short.text)
-                all_occurences[long].add(short)
-                rules[long.text] = long
-                # Add a rule to a matcher to find exactly this substring.
-                self.global_matcher.add(long.text, [[{"ORTH": x.text} for x in short]])
+            if long is not None:
+                new_long = long.text not in already_seen_long
+                new_short = short.text not in already_seen_short
+                if new_long and new_short:
+                    already_seen_long.add(long.text)
+                    already_seen_short.add(short.text)
+                    all_occurences[long].add(short)
+                    rules[long.text] = long
+                    # Add a rule to a matcher to find exactly this substring.
+                    patterns = [{"ORTH": x.text} for x in short]
+                    self.global_matcher.add(long.text, [patterns])
+
         to_remove = set()
-        global_matches = self.global_matcher(doc)
-        for match, start, end in global_matches:
-            string_key = self.global_matcher.vocab.strings[match]  # type: ignore
-            to_remove.add(string_key)
-            all_occurences[rules[string_key]].add(doc[start:end])
-        for key in to_remove:
-            # Clean up the global matcher.
-            self.global_matcher.remove(key)
+
+        # Check if there are any patterns before calling the matcher
+        if len(self.global_matcher) > 0:
+            global_matches = self.global_matcher(doc)
+            for match_id, start, end in global_matches:
+                string_key = self.global_matcher.vocab.strings[match_id]
+                to_remove.add(string_key)
+                all_occurences[rules[string_key]].add(doc[start:end])
+            for key in to_remove:
+                # Clean up the global matcher.
+                self.global_matcher.remove(key)
 
         return list((k, v) for k, v in all_occurences.items())
 
