@@ -29,6 +29,7 @@ def cached_path(
     """
     if cache_dir is None:
         cache_dir = DATASET_CACHE
+    print(f"Dataset cache is {cache_dir}")
     if isinstance(url_or_filename, Path):
         url_or_filename = str(url_or_filename)
 
@@ -42,11 +43,11 @@ def cached_path(
         return url_or_filename
     elif parsed.scheme == "":
         # File, but it doesn't exist.
-        raise FileNotFoundError("file {} not found".format(url_or_filename))
+        raise FileNotFoundError(f"File {url_or_filename} not found")
     else:
         # Something unknown
         raise ValueError(
-            "unable to parse {} as a URL or as a local path".format(url_or_filename)
+            f"unable to parse {url_or_filename} as a URL or as a local path"
         )
 
 
@@ -116,17 +117,17 @@ def get_from_cache(url: str, cache_dir: Optional[str] = None) -> str:
 
     os.makedirs(cache_dir, exist_ok=True)
 
+    print(f"Requesting from url {url}")
     response = requests.head(url, allow_redirects=True)
     if response.status_code != 200:
         raise IOError(
-            "HEAD request failed for url {} with status code {}".format(
-                url, response.status_code
-            )
+            f"HEAD request failed for url {url} with status code {response.status_code}"
         )
+    
     etag = response.headers.get("ETag")
 
     filename = url_to_filename(url, etag)
-
+    print(f"Requested file saved to {filename}")
     # get cache path to put the file
     cache_path = os.path.join(cache_dir, filename)
 

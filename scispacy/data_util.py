@@ -158,7 +158,9 @@ def read_full_med_mentions(
             shutil.rmtree(dir_path)
 
     resolved_directory_path = cached_path(directory_path)
-    if "tar.gz" in directory_path:
+    print(f"The resolved directory path for the medical mentions is {resolved_directory_path}")
+    if "tar.gz" in resolved_directory_path: # If the path points to a tar.gz file
+        print(f"Extracting contents from compressed tar.gz file {resolved_directory_path}")
         # Extract dataset to temp dir
         tempdir = tempfile.mkdtemp()
         print(

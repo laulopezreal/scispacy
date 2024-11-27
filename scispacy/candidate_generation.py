@@ -1,15 +1,18 @@
+import pickle
 from typing import Optional, List, Dict, Tuple, NamedTuple, Type
 import json
 import datetime
 from collections import defaultdict
 
+import os
 import scipy
 import numpy
 import joblib
+import scipy.sparse
 from sklearn.feature_extraction.text import TfidfVectorizer
 import nmslib
 from nmslib.dist import FloatIndex
-
+from pynndescent import NNDescent
 from scispacy.util import scipy_supports_sparse_float16
 from scispacy.file_cache import cached_path
 from scispacy.linking_utils import (
@@ -41,11 +44,19 @@ class LinkerPaths(NamedTuple):
     concept_aliases_list: str
 
 
+# UmlsLinkerPaths = LinkerPaths(
+#     ann_index="https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/data/linkers/2023-04-23/umls/nmslib_index.bin",  # noqa
+#     tfidf_vectorizer="https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/data/linkers/2023-04-23/umls/tfidf_vectorizer.joblib",  # noqa
+#     tfidf_vectors="https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/data/linkers/2023-04-23/umls/tfidf_vectors_sparse.npz",  # noqa
+#     concept_aliases_list="https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/data/linkers/2023-04-23/umls/concept_aliases.json",  # noqa
+# )
+
+# Test generated artifacts
 UmlsLinkerPaths = LinkerPaths(
-    ann_index="https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/data/linkers/2023-04-23/umls/nmslib_index.bin",  # noqa
-    tfidf_vectorizer="https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/data/linkers/2023-04-23/umls/tfidf_vectorizer.joblib",  # noqa
-    tfidf_vectors="https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/data/linkers/2023-04-23/umls/tfidf_vectors_sparse.npz",  # noqa
-    concept_aliases_list="https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/data/linkers/2023-04-23/umls/concept_aliases.json",  # noqa
+    ann_index="/home/kgvz782/ann_index.npz",  # noqa
+    tfidf_vectorizer="/home/kgvz782/tfidf_vectorizer.joblib",  # noqa
+    tfidf_vectors="/home/kgvz782/projects/scispacy/test_output/tfidf_vectors_sparse.npz",  # noqa
+    concept_aliases_list="/home/kgvz782/concept_aliases.json",  # noqa
 )
 
 MeshLinkerPaths = LinkerPaths(
@@ -93,7 +104,6 @@ DEFAULT_KNOWLEDGE_BASES: Dict[str, Type[KnowledgeBase]] = {
     "rxnorm": RxNorm,
 }
 
-
 class MentionCandidate(NamedTuple):
     """
     A data class representing a candidate entity that a mention may be linked to.
@@ -112,7 +122,6 @@ class MentionCandidate(NamedTuple):
     concept_id: str
     aliases: List[str]
     similarities: List[float]
-
 
 def load_approximate_nearest_neighbours_index(
     linker_paths: LinkerPaths,
@@ -133,18 +142,18 @@ def load_approximate_nearest_neighbours_index(
     concept_alias_tfidfs = scipy.sparse.load_npz(
         cached_path(linker_paths.tfidf_vectors)
     ).astype(numpy.float32)
-    ann_index = nmslib.init(
-        method="hnsw",
-        space="cosinesimil_sparse",
-        data_type=nmslib.DataType.SPARSE_VECTOR,
-    )
-    ann_index.addDataPointBatch(concept_alias_tfidfs)
-    ann_index.loadIndex(cached_path(linker_paths.ann_index))
-    query_time_params = {"efSearch": ef_search}
-    ann_index.setQueryTimeParams(query_time_params)
+    # ann_index = nmslib.init(
+    #     method="hnsw",
+    #     space="cosinesimil_sparse",
+    #     data_type=nmslib.DataType.SPARSE_VECTOR,
+    # )
+    # ann_index.addDataPointBatch(concept_alias_tfidfs)
+    # ann_index.loadIndex(cached_path(linker_paths.ann_index))
+    # query_time_params = {"efSearch": ef_search}
+    # ann_index.setQueryTimeParams(query_time_params)
+    ann_index = joblib.load(cached_path(linker_paths.ann_index))
 
     return ann_index
-
 
 class CandidateGenerator:
     """
@@ -197,13 +206,13 @@ class CandidateGenerator:
 
     def __init__(
         self,
-        ann_index: Optional[FloatIndex] = None,
+        ann_index = None,
         tfidf_vectorizer: Optional[TfidfVectorizer] = None,
         ann_concept_aliases_list: Optional[List[str]] = None,
         kb: Optional[KnowledgeBase] = None,
-        verbose: bool = False,
+        verbose: bool = True,
         ef_search: int = 200,
-        name: Optional[str] = None,
+        name: Optional[str] = "umls",
     ) -> None:
         if name is not None and any(
             [ann_index, tfidf_vectorizer, ann_concept_aliases_list, kb]
@@ -266,8 +275,11 @@ class CandidateGenerator:
         # remove empty vectors before calling `ann_index.knnQueryBatch`
         vectors = vectors[empty_vectors_boolean_flags]
 
-        # call `knnQueryBatch` to get neighbors
-        original_neighbours = self.ann_index.knnQueryBatch(vectors, k=k)
+        # NMSLIB VERSION call `knnQueryBatch` to get neighbors
+        # original_neighbours = self.ann_index.knnQueryBatch(vectors, k=k)
+
+        # PYNNDESCENT VERSION query to get neighbors
+        original_neighbours = self.ann_index.query(vectors, k=k)
 
         neighbors, distances = zip(
             *[(x[0].tolist(), x[1].tolist()) for x in original_neighbours]
@@ -361,7 +373,6 @@ class CandidateGenerator:
 
         return batch_mention_candidates
 
-
 def create_tfidf_ann_index(
     out_path: str, kb: Optional[KnowledgeBase] = None
 ) -> Tuple[List[str], TfidfVectorizer, FloatIndex]:
@@ -376,15 +387,19 @@ def create_tfidf_ann_index(
         The kb items to generate the index and vectors for.
 
     """
-    if not scipy_supports_sparse_float16():
-        raise RuntimeError(
-            "This function requires scipy<1.11, which only runs on Python<3.11."
-        )
-
-    tfidf_vectorizer_path = f"{out_path}/tfidf_vectorizer.joblib"
-    ann_index_path = f"{out_path}/nmslib_index.bin"
-    tfidf_vectors_path = f"{out_path}/tfidf_vectors_sparse.npz"
-    umls_concept_aliases_path = f"{out_path}/concept_aliases.json"
+    # if not scipy_supports_sparse_float16():
+    #     raise RuntimeError(
+    #         "This function requires scipy<1.11, which only runs on Python<3.11."
+    #     )
+    # Format datetime as YYYYmmddhhmm  
+    date_subfolder = datetime.datetime.now().strftime("%Y%m%d%H%M")
+    output_path = f"{out_path}/{date_subfolder}"
+    print(f"Creating subfolder to save the outputs at {output_path}")
+    os.makedirs(output_path, exist_ok=True,)
+    tfidf_vectorizer_path = f"{output_path}/tfidf_vectorizer.joblib"
+    ann_index_path = f"{output_path}/ann_index.pkl"
+    tfidf_vectors_path = f"{output_path}/tfidf_vectors_sparse.npz"
+    umls_concept_aliases_path = f"{output_path}/concept_aliases.json"
 
     kb = kb or UmlsKnowledgeBase()
 
@@ -399,6 +414,7 @@ def create_tfidf_ann_index(
     # improve overall graph connectivity. (bigger M -> higher recall, slower creation)
     # For more details see:  https://arxiv.org/pdf/1603.09320.pdf?
     m_parameter = 100
+
     # `C` for Construction. Set to the maximum recommended value
     # Improves recall at the expense of longer indexing time
     construction = 2000
@@ -409,28 +425,41 @@ def create_tfidf_ann_index(
         "efConstruction": construction,
         "post": 0,
     }
-
-    print(
-        f"No tfidf vectorizer on {tfidf_vectorizer_path} or ann index on {ann_index_path}"
-    )
+    
     concept_aliases = list(kb.alias_to_cuis.keys())
-
+    vector_exists = os.path.exists(tfidf_vectorizer_path)
+    if not vector_exists:
+        print(f"TFIDF vectorizernot NOT found in {tfidf_vectorizer_path}")
+    elif vector_exists:
+        print(f"TFIDF vectorizer found in {tfidf_vectorizer_path}")
+    
     # NOTE: here we are creating the tf-idf vectorizer with float32 type, but we can serialize the
-    # resulting vectors using float16, meaning they take up half the memory on disk. Unfortunately
-    # we can't use the float16 format to actually run the vectorizer, because of this bug in sparse
+    # resulting vectors using float16, meaning they take up half the memory on disk --- 
+    # TODO: Regarding the above BUT THEN YOU INTRODUCE A INCOPATIBILIYY WITH SPICY AND PYTHON>3.11.
+
+    #  Unfortunately we can't use the float16 format to actually run the vectorizer, because of this bug in sparse
     # matrix representations in scipy: https://github.com/scipy/scipy/issues/7408
-    print(f"Fitting tfidf vectorizer on {len(concept_aliases)} aliases")
+
+    # Fitting TFIDF vectorizer
+    fitting_start = datetime.datetime.now()
+    print(f"Fitting TFIDF vectorizer on {len(concept_aliases)} aliases")
     tfidf_vectorizer = TfidfVectorizer(
         analyzer="char_wb", ngram_range=(3, 3), min_df=10, dtype=numpy.float32
     )
-    start_time = datetime.datetime.now()
     concept_alias_tfidfs = tfidf_vectorizer.fit_transform(concept_aliases)
+    fitting_end = datetime.datetime.now()
+    fitting_time = fitting_end - fitting_start
+    print(f"Fitting the tfidf vectorizer took {fitting_time.total_seconds()} seconds")
+
+    # Saving TFIDF vectorizer
+    saving_start = datetime.datetime.now()
     print(f"Saving tfidf vectorizer to {tfidf_vectorizer_path}")
     joblib.dump(tfidf_vectorizer, tfidf_vectorizer_path)
-    end_time = datetime.datetime.now()
-    total_time = end_time - start_time
-    print(f"Fitting and saving vectorizer took {total_time.total_seconds()} seconds")
+    saving_end = datetime.datetime.now()
+    saving_time = saving_end - saving_start
+    print(f"Saving the tfid vectorizer took {saving_time.total_seconds()} seconds")
 
+     # Find zero vectors
     print("Finding empty (all zeros) tfidf vectors")
     empty_tfidfs_boolean_flags = numpy.array(
         concept_alias_tfidfs.sum(axis=1) != 0
@@ -438,6 +467,7 @@ def create_tfidf_ann_index(
     number_of_non_empty_tfidfs = sum(empty_tfidfs_boolean_flags == False)  # noqa: E712
     total_number_of_tfidfs = numpy.size(concept_alias_tfidfs, 0)
 
+    # Remove zero vectors
     print(
         f"Deleting {number_of_non_empty_tfidfs}/{total_number_of_tfidfs} aliases because their tfidf is empty"
     )
@@ -450,26 +480,133 @@ def create_tfidf_ann_index(
     concept_alias_tfidfs = concept_alias_tfidfs[empty_tfidfs_boolean_flags]
     assert len(concept_aliases) == numpy.size(concept_alias_tfidfs, 0)
 
+    # Save removed vectors
+    json.dump(concept_aliases, open(umls_concept_aliases_path, "w"))
     print(
         f"Saving list of concept ids and tfidfs vectors to {umls_concept_aliases_path} and {tfidf_vectors_path}"
     )
-    json.dump(concept_aliases, open(umls_concept_aliases_path, "w"))
-    scipy.sparse.save_npz(
-        tfidf_vectors_path, concept_alias_tfidfs.astype(numpy.float16)
+    scipy.sparse.save_npz(  
+        tfidf_vectors_path, concept_alias_tfidfs.astype(numpy.float32)
     )
 
-    print(f"Fitting ann index on {len(concept_aliases)} aliases (takes 2 hours)")
-    start_time = datetime.datetime.now()
-    ann_index = nmslib.init(
-        method="hnsw",
-        space="cosinesimil_sparse",
-        data_type=nmslib.DataType.SPARSE_VECTOR,
-    )
-    ann_index.addDataPointBatch(concept_alias_tfidfs)
-    ann_index.createIndex(index_params, print_progress=True)
-    ann_index.saveIndex(ann_index_path)
-    end_time = datetime.datetime.now()
-    elapsed_time = end_time - start_time
-    print(f"Fitting ann index took {elapsed_time.total_seconds()} seconds")
+    # TODO: Add documentation -> Why use PyNNDescent?
+    # PyNNDescent provides fast approximate nearest neighbor queries. 
+    # The ann-benchmarks system puts it solidly in the mix of top performing ANN libraries:
 
+    # Convert NumPy array to Compressed Sparse Row matrix data type
+    conversion_start = datetime.datetime.now()
+    print("Converting from numpy array to Compressed Sparse Row format")
+    sparse_matrix_csr = scipy.sparse.csr_matrix(concept_alias_tfidfs)
+
+    print("Numpy Dense array dimmension:")
+    print(concept_alias_tfidfs.shape)
+    del concept_alias_tfidfs
+
+    print("\nCSR sparse matrix:")
+    # print(type(sparse_matrix_csr))
+    # print(sparse_matrix_csr.data)
+    # print(sparse_matrix_csr.indices.size)
+
+    sparse_matrix_memory =     (
+        sparse_matrix_csr.data.nbytes
+        + sparse_matrix_csr.indices.size
+        + sparse_matrix_csr.indptr.nbytes
+    ) / 1024**2
+    print(f"CSR memory is {sparse_matrix_memory} Mb")
+    
+    # Remove rows with no data or low density:
+    sparse_matrix_csr = sparse_matrix_csr[sparse_matrix_csr.getnnz(1) > 0]
+
+    # Monitor the density of the matrix:
+    density = sparse_matrix_csr.nnz / (sparse_matrix_csr.shape[0] * sparse_matrix_csr.shape[1])
+    print(f"Matrix density: {density:.4f}")
+    conversion_ends = datetime.datetime.now()
+    conversion_time = conversion_ends - conversion_start
+    # print(f"Converting the numpy array to CSR format took {conversion_time.seconds()}")
+
+    # Fitting ANN on concept aliases
+    print(f"Fitting ANN PyNNDescent index on {len(concept_aliases)} aliases")
+    fitting_ann_index_start = datetime.datetime.now()
+    ann_index = NNDescent(
+        sparse_matrix_csr, 
+        metric='cosine', 
+        low_memory=True, 
+        n_trees=5,
+        verbose=True,
+        compressed=True,
+        )
+    fitting_ann_index_end = datetime.datetime.now()
+    fitting_ann_index_time = fitting_ann_index_end - fitting_ann_index_start
+    print(f"Fitting PyNNDescent index took {fitting_ann_index_time.total_seconds()} seconds")
+
+    import sys
+    print(f"Index size: {sys.getsizeof(ann_index) / (1024 ** 2):.2f} MB")
+    
+    # Saving ANN index
+    saving_start = datetime.datetime.now()
+    # print(f"Attempting to save the ANN index to {ann_index_path} using JOBLIB w/ compression 3")
+
+    # This below crashes!
+    # joblib.dump(index, ann_index_path)
+    # Alternative?
+    # index = joblib.load("/home/kgvz782/projects/scispacy/test_output/nmslib_index.bin")
+    # index = scipy.sparse.load_npz("/home/kgvz782/projects/scispacy/test_output/ann_index.npz")
+
+    # Let's try joblib
+    # Save the PyNNDescent index to a file
+    # Oom error
+    # joblib.dump(ann_index, ann_index_path, compress=3)
+
+    # oom error
+    # joblib.dump(ann_index, ann_index_path)
+
+    # # Pickle
+    # print(f"Attempting to save the ANN index to {ann_index_path} using pickle w/ protocol=pickle.HIGHEST_PROTOCOL")
+    # with open(ann_index_path, "wb") as f:
+    #     pickle.dump(ann_index, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+    # 2. Use Compression While Saving
+    #Using compression reduces memory usage during serialization and the size of the saved file:
+    import gzip
+    # Save with gzip compression
+    print(f"Attempting to save the ANN index to {ann_index_path} using gziped compressed pickle w/ protocol=pickle.HIGHEST_PROTOCOL")
+    with gzip.open("pynndescent_index.pkl.gz", "wb") as f:
+        pickle.dump(ann_index, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    # Convert back to SCR matrix and save - doesn't work
+    # index_scr = scipy.sparse.csr_matrix(ann_index)
+    # scipy.sparse.save_npz(  
+    #     ann_index_path,
+    #     index_scr,
+    # )
+
+    # This doesn't work :()
+    # scipy.sparse.save_npz(  
+    #     ann_index_path,
+    #     # index.astype(numpy.float32),
+    #     ann_index,
+    # )
+
+    saving_end = datetime.datetime.now()
+    saving_time = saving_end - saving_start
+    print(f"Saving the tfid vectorizer took {saving_time.total_seconds()} seconds")
+
+    # return concept_aliases, tfidf_vectorizer, index
+
+    # print(f"Fitting ANN index on {len(concept_aliases)} aliases using nmslib(takes 2 hours)")
+    # fitting_ann_index_start = datetime.datetime.now()
+    # ann_index = nmslib.init(
+    #     method="hnsw",
+    #     space="cosinesimil_sparse",
+    #     data_type=nmslib.DataType.SPARSE_VECTOR,
+    # )
+    # ann_index.addDataPointBatch(concept_alias_tfidfs)
+    # ann_index.createIndex(index_params, print_progress=True)
+    # ann_index.saveIndex(ann_index_path)
+    # fitting_ann_index_end = datetime.datetime.now()
+    # fitting_ann_index_time = fitting_ann_index_end - fitting_ann_index_start
+    # print(f"Fitting ann index took {fitting_ann_index_time.total_seconds()} seconds")
+    
+    print(f"Script finished at {datetime.datetime.now()}")
     return concept_aliases, tfidf_vectorizer, ann_index

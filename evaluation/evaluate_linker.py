@@ -15,7 +15,8 @@ def main():
     linker = nlp.get_pipe("scispacy_linker")
 
     med_mentions = read_full_med_mentions(
-        os.path.join(EVALUATION_FOLDER_PATH, os.pardir, "data", "med_mentions"),
+        # os.path.join(EVALUATION_FOLDER_PATH, os.pardir, "data", "med_mentions"),
+        "/home/kgvz782/projects/scispacy/data/med_mentions/med_mentions.tar.gz",
         use_umls_ids=True,
     )
 
@@ -26,9 +27,9 @@ def main():
     correct_at_2 = 0
     correct_at_10 = 0
     correct_at_40 = 0
-    correct_at_60 = 0
-    correct_at_80 = 0
-    correct_at_100 = 0
+    # correct_at_60 = 0
+    # correct_at_80 = 0
+    # correct_at_100 = 0
     for text_doc, entities in tqdm(test_data):
         for start, end, label in entities["entities"]:
             text_span = text_doc[start:end]

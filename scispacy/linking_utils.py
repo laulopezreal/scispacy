@@ -60,7 +60,7 @@ class KnowledgeBase:
                 "Instead, use a subclass (e.g UmlsKnowledgeBase) or pass a path to a kb."
             )
         if file_path.endswith("jsonl"):
-            raw = (json.loads(line) for line in open(cached_path(file_path)))
+                raw = (json.loads(line) for line in open(cached_path(file_path)))
         else:
             raw = json.load(open(cached_path(file_path)))
 
@@ -83,6 +83,7 @@ class UmlsKnowledgeBase(KnowledgeBase):
         file_path: str = DEFAULT_UMLS_PATH,
         types_file_path: str = DEFAULT_UMLS_TYPES_PATH,
     ):
+        print(f"UMLS Knowledge Base File path is {file_path}")
         super().__init__(file_path)
 
         self.semantic_type_tree: UmlsSemanticTypeTree = construct_umls_tree_from_tsv(
