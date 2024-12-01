@@ -83,7 +83,7 @@ class UmlsKnowledgeBase(KnowledgeBase):
         file_path: str = DEFAULT_UMLS_PATH,
         types_file_path: str = DEFAULT_UMLS_TYPES_PATH,
     ):
-        print(f"UMLS Knowledge Base File path is {file_path}")
+        print(f"Building UMLS Knowledge From Base File: {file_path}")
         super().__init__(file_path)
 
         self.semantic_type_tree: UmlsSemanticTypeTree = construct_umls_tree_from_tsv(

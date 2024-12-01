@@ -11,12 +11,16 @@ DEFAULT_UMLS_TYPES_PATH = "https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/da
 
 
 def main(kb_path: Optional[str], output_path: str):
-
     os.makedirs(output_path, exist_ok=True)
     print(f"Running script at {datetime.now()}")
-    # kb = KnowledgeBase(kb_path)
-    create_tfidf_ann_index(output_path,)
-
+    kb = None
+    if kb_path:
+        kb = KnowledgeBase(kb_path)
+    create_tfidf_ann_index(
+        out_path=output_path,
+        kb = kb,
+        test_mode=True,
+        )
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -24,12 +28,13 @@ if __name__ == "__main__":
         '--kb_path',
         help="Path to the KB file.",
         # required=True,
-        # default=DEFAULT_UMLS_PATH,
+        default=None,
     )
     parser.add_argument(
         '--output_path',
         help="Path to the output directory.",
-        required=True,
+        # required=True,
+        default="output/"
     )
 
     args = parser.parse_args()
