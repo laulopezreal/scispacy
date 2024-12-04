@@ -27,7 +27,7 @@ from scispacy.linking_utils import (
     HumanPhenotypeOntology,
 )
 
-SUBFOLDER = "202411301949"
+SUBFOLDER = "202412021211"
 
 class LinkerPaths(NamedTuple):
     """
@@ -497,7 +497,7 @@ def create_tfidf_ann_index(
     initial_n = len(concept_aliases)
 
     if test_mode:
-        concept_aliases = concept_aliases[0:4000000] 
+        concept_aliases = concept_aliases[0:5000000] 
         print(f"Test mode enabled: reducing concept aliases from {initial_n} to {len(concept_aliases)} for testing")
         
 
