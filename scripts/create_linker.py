@@ -18,8 +18,10 @@ def main(kb_path: Optional[str], output_path: str):
         kb = KnowledgeBase(kb_path)
     create_tfidf_ann_index(
         out_path=output_path,
+        tfidf_vectorizer_path="/home/kgvz782/projects/scispacy/output/202502171253/tfidf_vectors_sparse.npz",
         kb = kb,
-        test_mode=True,
+        test_mode=False,
+        n_test=1000,
         )
 
 if __name__ == "__main__":
