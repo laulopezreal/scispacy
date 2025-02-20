@@ -29,7 +29,7 @@ def cached_path(
     """
     if cache_dir is None:
         cache_dir = DATASET_CACHE
-    print(f"Dataset cache is {cache_dir}")
+    # print(f"Dataset cache is {cache_dir}")
     if isinstance(url_or_filename, Path):
         url_or_filename = str(url_or_filename)
 
