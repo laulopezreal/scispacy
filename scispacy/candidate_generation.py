@@ -5,16 +5,16 @@ import json
 import datetime
 from collections import defaultdict
 
-import os
-from bm25s import BM25 as BM25Sparse
-# from bm25s import tokenize
+import bm25s
+import torch
 from txtai.pipeline import Tokenizer
-import scipy
 import numpy
-import joblib
-import scipy.sparse
-import scipy.sparse
 from sklearn.feature_extraction.text import TfidfVectorizer
+
+from tqdm import tqdm
+from transformers import AutoTokenizer, AutoModelForMaskedLM
+import torch
+import Stemmer
 
 from scispacy.file_cache import cached_path
 from scispacy.linking_utils import (
@@ -26,12 +26,12 @@ from scispacy.linking_utils import (
     HumanPhenotypeOntology,
 )
 
-SUBFOLDER = "202502171802"
+SUBFOLDER = "202502201453"
 
 class LinkerPaths(NamedTuple):
     """
     Encapsulates all the (possibly remote) paths to data for a scispacy CandidateGenerator.
-    ann_index: str
+    index: str
         Path to the approximate nearest neighbours index.
     tfidf_vectorizer: str
         Path to the joblib serialized sklearn TfidfVectorizer.
@@ -45,7 +45,6 @@ class LinkerPaths(NamedTuple):
     tfidf_vectorizer: str
     tfidf_vectors: str
     concept_aliases_list: str
-
 
 # UmlsLinkerPaths = LinkerPaths(
 #     ann_index="https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/data/linkers/2023-04-23/umls/nmslib_index.bin",  # noqa
@@ -89,7 +88,6 @@ RxNormLinkerPaths = LinkerPaths(
     tfidf_vectors="https://ai2-s2-scispacy.s3-us-west-2.amazonaws.com/data/linkers/2023-04-23/rxnorm/tfidf_vectors_sparse.npz",  # noqa
     concept_aliases_list="https://ai2-s2-scispacy.s3-us-west-2.amazonaws.com/data/linkers/2023-04-23/rxnorm/concept_aliases.json",  # noqa
 )
-
 
 DEFAULT_PATHS: Dict[str, LinkerPaths] = {
     "umls": UmlsLinkerPaths,
@@ -142,10 +140,11 @@ def load_approximate_nearest_neighbours_index(
         but reducing to around ~100 will increase query speed by an order
         of magnitude for a small performance hit.
     """
-    path = "/home/kgvz782/projects/scispacy/output/202502171706"
+    # path = "/home/kgvz782/projects/scispacy/output/202502171706"
     index_path = linker_paths.index
-    print(f"Loading index from {path}")
-    searcher = BM25Sparse.load(index_path, load_corpus=True)
+    print(f"Loading index from {index_path}")
+    _bm25s_ = bm25s.BM25(backend="numba")
+    searcher = _bm25s_.load(index_path, load_corpus=True)
     return searcher
 
 class CandidateGenerator:
@@ -178,12 +177,12 @@ class CandidateGenerator:
 
     Parameters
     ----------
-    ann_index: FloatIndex
+    index: FloatIndex
         An nmslib approximate nearest neighbours index.
     tfidf_vectorizer: TfidfVectorizer
         The vectorizer used to encode mentions.
     ann_concept_aliases_list: List[str]
-        A list of strings, mapping the indices used in the ann_index to possible KB mentions.
+        A list of strings, mapping the indices used in the index to possible KB mentions.
         This is essentially used a lookup between the ann index and actual mention strings.
     kb: KnowledgeBase
         A class representing canonical concepts from the knowledge graph.
@@ -192,14 +191,14 @@ class CandidateGenerator:
     ef_search: int
         The efs search parameter used in the index. This substantially effects runtime speed
         (higher is slower but slightly more accurate). Note that this parameter is ignored
-        if a preconstructed ann_index is passed.
+        if a preconstructed index is passed.
     name: str, optional (default = None)
         The name of the pretrained entity linker to load. Must be one of 'umls' or 'mesh'.
     """
 
     def __init__(
         self,
-        ann_index = None,
+        index = None,
         tfidf_vectorizer: Optional[TfidfVectorizer] = None,
         ann_concept_aliases_list: Optional[List[str]] = None,
         kb: Optional[KnowledgeBase] = None,
@@ -208,7 +207,7 @@ class CandidateGenerator:
         name: Optional[str] = "umls",
     ) -> None:
         if name is not None and any(
-            [ann_index, tfidf_vectorizer, ann_concept_aliases_list, kb]
+            [index, tfidf_vectorizer, ann_concept_aliases_list, kb]
         ):
             raise ValueError(
                 "You cannot pass both a name argument and other constuctor arguments."
@@ -221,17 +220,11 @@ class CandidateGenerator:
 
         linker_paths = DEFAULT_PATHS.get(name, UmlsLinkerPaths)
 
-        # print(f"Loading ANN index from {linker_paths.ann_index}")
-        self.ann_index = ann_index or load_approximate_nearest_neighbours_index(
+        self.index = index or load_approximate_nearest_neighbours_index(
             linker_paths=linker_paths, ef_search=ef_search
         )
 
-        # print(f"Loading TFIDF vectorizer from {linker_paths.tfidf_vectorizer}")
-        # self.vectorizer = tfidf_vectorizer or joblib.load(
-        #     cached_path(linker_paths.tfidf_vectorizer)
-        # )
-
-        print(f"Loading ANN concept aliases  from {linker_paths.concept_aliases_list}")
+        print(f"Loading concept aliases from {linker_paths.concept_aliases_list}")
         self.ann_concept_aliases_list = ann_concept_aliases_list or json.load(
             open(cached_path(linker_paths.concept_aliases_list))
         )
@@ -273,17 +266,8 @@ class CandidateGenerator:
         # remove empty vectors before calling `ann_index.knnQueryBatch`
         vectors = vectors[empty_vectors_boolean_flags]
 
-        # NMSLIB VERSION call `knnQueryBatch` to get neighbors
-        # original_neighbours = self.ann_index.knnQueryBatch(vectors, k=k)
-
-        # PYNNDESCENT VERSION query to get neighbors
-        # original_neighbours = self.ann_index.query(vectors, k=k)
-
-        neighbors, distances = self.ann_index.search_batched(vectors, final_num_neighbors=25)
-
-        # neighbors, distances = zip(
-        #     *[(x[0].tolist(), x[1].tolist()) for x in original_neighbours]
-        # )
+        neighbors, distances = self.index.search_batched(vectors, final_num_neighbors=25)
+        
         neighbors = list(neighbors)  # type: ignore
         distances = list(distances)  # type: ignore
 
@@ -301,6 +285,7 @@ class CandidateGenerator:
         )[:-1]
 
         return extended_neighbors, extended_distances
+        
 
     def __call__(
         self, mention_texts: List[str], k: int
@@ -337,17 +322,35 @@ class CandidateGenerator:
         # tfidf vectorizer crashes on an empty array, so we return early here
         if mention_texts == []:
             return []
-        tokenizer = Tokenizer()
-        query_tokens = [tokenizer(x) for x in mention_texts]
-        batch_neighbors, batch_distances = self.ann_index.retrieve(query_tokens, k=2)
+        
+        # bm25s tokenizer
+        stemmer = Stemmer.Stemmer("english")
+        tokenizer = bm25s.tokenization.Tokenizer(
+            # stemmer=stemmer, 
+            stopwords=None,
+            )
+        queries_tokenized = tokenizer.tokenize(mention_texts, return_as="string",)
+        
+
+        # SPLADE tokenizer and model: FAILS BC WE CANT ACCESS HUGGING FACE
+        # tokenizer = AutoTokenizer.from_pretrained("naver/splade-cocondenser-ensembledistil")
+        # splade_model = AutoModelForMaskedLM.from_pretrained("naver/splade-cocondenser-ensembledistil")
+        # splade_model.eval()
+        # queries_tokenized = [get_splade_sparse_vector(text, tokenizer, splade_model) for text in mention_texts]
+
+        # TXTAI tokenizer
+        # tokenizer = Tokenizer()
+        # queries_tokenized = [tokenizer(x) for x in mention_texts]
+
+        batch_neighbors, batch_distances = self.index.retrieve(queries_tokenized, k=2)
 
         end_time = datetime.datetime.now()
         total_time = end_time - start_time
 
-        # self.verbose= True
+        self.verbose= False
         if self.verbose:
             print(f"Mention texts is {mention_texts}")
-            print(f"Mention texts token is {query_tokens}")
+            print(f"Mention texts token is {queries_tokenized}")
             print(f"Finding neighbors took {total_time.total_seconds()} seconds")
        
         batch_mention_candidates = []
@@ -376,90 +379,16 @@ class CandidateGenerator:
 
         return batch_mention_candidates
 
+def get_splade_sparse_vector(text, tokenizer, splade_model):
+    inputs = tokenizer(text, return_tensors="pt")
+    with torch.no_grad():
+        outputs = splade_model(**inputs).logits  # Get token probabilities
 
-def create_tfidf_ann_index(
-    out_path: str, tfidf_vectorizer_path: Optional[str] = None, kb: Optional[KnowledgeBase] = None, test_mode: bool = False, n_test: Optional[int]=1000,
-    ):
-    """
-    Build tfidf vectorizer and ann index.
+    # Extract token IDs and their importance scores
+    token_ids = inputs.input_ids.squeeze().tolist()
+    token_probs = torch.max(outputs, dim=-1).values.squeeze().tolist()
 
-    Parameters
-    ----------
-    out_path: str, required.
-        The path where the various model pieces will be saved.
-    kb : KnowledgeBase, optional.
-        The kb items to generate the index and vectors for.
-
-    """
-    # Create a subfolder to save the linker artifacts
-    #  Format datetime as YYYYmmddhhmm  
-    date_subfolder = datetime.datetime.now().strftime("%Y%m%d%H%M")
-    output_path = f"{out_path}{date_subfolder}"
-
-    print(f"Creating subfolder to save the outputs at {output_path}")
-    os.makedirs(output_path, exist_ok=True,)
-
-    # ann_index_path = f"{output_path}/ann_index.npz"
-    tfidf_vectors_path = f"{output_path}/tfidf_vectors_sparse.npz"
-    umls_concept_aliases_path = f"{output_path}/concept_aliases.json"
-
-    cached_data = "/home/kgvz782/.scispacy/datasets/"
-    umls_file = cached_data + "d5e593bc2d8adeee7754be423cd64f5d331ebf26272074a2575616be55697632.0660f30a60ad00fffd8bbf084a18eb3f462fd192ac5563bf50940fc32a850a3c.umls_2022_ab_cat0129.jsonl"
-    umls_types_file = cached_data + "21a1012c532c3a431d60895c509f5b4d45b0f8966c4178b892190a302b21836f.330707f4efe774134872b9f77f0e3208c1d30f50800b3b39a6b8ec21d9adf1b7.umls_semantic_type_tree.tsv"
-    if kb:
-        kb = kb
-    elif os.path.exists(umls_file) and os.path.exists(umls_types_file):
-        kb = UmlsKnowledgeBase(file_path=umls_file, types_file_path=umls_types_file)
-    else:
-        kb = UmlsKnowledgeBase()
-
-    # NMSLIB hyperparameters (very important)
-    # guide: https://github.com/nmslib/nmslib/blob/master/manual/methods.md
-    # Default values resulted in very low recall.
-
-    # set to the maximum recommended value. Improves recall at the expense of longer indexing time.
-    # We use the HNSW (Hierarchical Navigable Small World Graph) representation which is constructed
-    # by consecutive insertion of elements in a random order by connecting them to M closest neighbours
-    # from the previously inserted elements. These later become bridges between the network hubs that
-    # improve overall graph connectivity. (bigger M -> higher recall, slower creation)
-    # For more details see:  https://arxiv.org/pdf/1603.09320.pdf?
-    m_parameter = 100
-
-    # `C` for Construction. Set to the maximum recommended value
-    # Improves recall at the expense of longer indexing time
-    construction = 2000
-    num_threads = 60  # set based on the machine
-    index_params = {
-        "M": m_parameter,
-        "indexThreadQty": num_threads,
-        "efConstruction": construction,
-        "post": 0,
-    }
+    # Keep only important words with a probability threshold
+    sparse_vector = {tokenizer.decode([tid]): prob for tid, prob in zip(token_ids, token_probs) if prob > 0.5}
     
-    # Get concept aliases from Knowledge b=Base
-    concept_aliases = list(kb.alias_to_cuis.keys())
-    initial_n = len(concept_aliases)
-
-    if test_mode:
-        concept_aliases = concept_aliases[0:n_test] 
-        print(f"Test mode enabled: reducing concept aliases from {initial_n} to {len(concept_aliases)} for testing")
-        
-
-    # Test txtai
-    print(f"Testing TXTAI")
-    tokenizer = Tokenizer()
-    model = BM25Sparse(method="lucene", k1=1.2, b=0.75)
-    # for x in concept_aliases[0:10]:
-    #     print(x)
-    json.dump(concept_aliases, open(umls_concept_aliases_path, "w"))
-
-    vectorizer = [tokenizer(x) for x in concept_aliases]
-    model.index(vectorizer, leave_progress=False)
-    saving_start = datetime.datetime.now()
-    model.save(output_path)
-    saving_end = datetime.datetime.now()
-    saving_time = saving_end - saving_start
-    print(f"Saving the tfid vectorizer took {saving_time.total_seconds()} seconds")
-    
-    print(f"Script finished at {datetime.datetime.now()}")
-    return concept_aliases, vectorizer, model
+    return sparse_vector
