@@ -38,6 +38,8 @@ def main():
             
             text_span = text_doc[start:end]
             candidates = linker.candidate_generator([text_span], 40)[0]
+            # print(f"🔍 Candidates: {candidates}")
+            # print(f"🔍 Candidate Type: {type(candidates[0])}")
             sorted_candidates = sorted(
                 candidates, reverse=True, key=lambda x: max(x.similarities)
             )

@@ -3,7 +3,7 @@ import os
 from datetime import datetime
 from typing import Optional
 
-from scispacy.searcher import create_tfidf_index
+from scispacy.index import create_tfidf_index
 from scispacy.linking_utils import KnowledgeBase
 
 DEFAULT_UMLS_PATH = "https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/data/kbs/2023-04-23/umls_2022_ab_cat0129.jsonl"  # noqa
@@ -18,7 +18,6 @@ def main(kb_path: Optional[str], output_path: str):
         kb = KnowledgeBase(kb_path)
     create_tfidf_index(
         out_path=output_path,
-        tfidf_vectorizer_path="/home/kgvz782/projects/scispacy/output/202502171253/tfidf_vectors_sparse.npz",
         kb = kb,
         test_mode=False,
         n_test=1000,

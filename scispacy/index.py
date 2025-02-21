@@ -4,14 +4,19 @@ import datetime
 
 import os
 import bm25s
+import faiss
+import numpy as np
+from tqdm import tqdm
 from txtai.pipeline import Tokenizer
 from scispacy.linking_utils import KnowledgeBase
-from scispacy.candidate_generation import UmlsKnowledgeBase, get_splade_sparse_vector
-from transformers import AutoTokenizer, AutoModelForMaskedLM
+from scispacy.candidate_generation import UmlsKnowledgeBase
+from scispacy.util import get_embedding
+
+# from transformers import AutoTokenizer, AutoModelForMaskedLM
 import Stemmer
 
 def create_tfidf_index(
-    out_path: str, tfidf_vectorizer_path: Optional[str] = None, kb: Optional[KnowledgeBase] = None, test_mode: bool = False, n_test: Optional[int]=1000,):
+    out_path: str, dense_index_path: str = "data/faiss_index.bin", kb: Optional[KnowledgeBase] = None, test_mode: bool = False, n_test: Optional[int]=1000,):
     """
     Build tfidf vectorizer and ann index.
 
@@ -42,30 +47,8 @@ def create_tfidf_index(
         kb = UmlsKnowledgeBase(file_path=umls_file, types_file_path=umls_types_file)
     else:
         kb = UmlsKnowledgeBase()
-
-    # NMSLIB hyperparameters (very important)
-    # guide: https://github.com/nmslib/nmslib/blob/master/manual/methods.md
-    # Default values resulted in very low recall.
-
-    # set to the maximum recommended value. Improves recall at the expense of longer indexing time.
-    # We use the HNSW (Hierarchical Navigable Small World Graph) representation which is constructed
-    # by consecutive insertion of elements in a random order by connecting them to M closest neighbours
-    # from the previously inserted elements. These later become bridges between the network hubs that
-    # improve overall graph connectivity. (bigger M -> higher recall, slower creation)
-    # For more details see:  https://arxiv.org/pdf/1603.09320.pdf?
-    # m_parameter = 100
-    # `C` for Construction. Set to the maximum recommended value
-    # Improves recall at the expense of longer indexing time
-    # construction = 2000
-    # num_threads = 60  # set based on the machine
-    # index_params = {
-    #     "M": m_parameter,
-    #     "indexThreadQty": num_threads,
-    #     "efConstruction": construction,
-    #     "post": 0,
-    # }
     
-    # Get concept aliases from Knowledge b=Base
+    # Get concept aliases from Knowledge Base
     concept_aliases = list(kb.alias_to_cuis.keys())
     initial_n = len(concept_aliases)
 
@@ -74,6 +57,26 @@ def create_tfidf_index(
         print(f"Test mode enabled: reducing concept aliases from {initial_n} to {len(concept_aliases)} for testing")
     print(f"Saving concept aliases to {umls_concept_aliases_path}")
     json.dump(concept_aliases, open(umls_concept_aliases_path, "w"))
+    
+    if not os.path.exists(dense_index_path):
+        print("Creating FAISS index...")
+        # Generate embeddings for concepts
+        concept_vectors = np.array([get_embedding(text) for text in tqdm(concept_aliases, leave=True)])
+        
+        # Create FAISS index (L2 distance)
+        print("Creating FAISS index...")
+        dimension = concept_vectors.shape[1]
+        faiss_index = faiss.IndexFlatL2(dimension)
+        faiss_index.add(concept_vectors)
+
+        # Save FAISS index
+        print(f"Saving FAISS index.")
+        faiss.write_index(faiss_index, os.path.join(output_path, "faiss_index.bin"))
+    # np.save(os.path.join(output_path, "umls_concepts.npy"), np.array(concept_aliases))
+    else:
+        print(f"✅ FAISS index already exists at {dense_index_path}")
+
+    print("✅ FAISS index created and saved.")
 
     # Test txtai tokenizer
     # print("Using txtai tokenizer with BM25S algorithm to create the index")
@@ -81,11 +84,12 @@ def create_tfidf_index(
     # corpus_tokenized = [tokenizer(doc) for doc in concept_aliases]
 
     # bm25s tokenizer
-    print("Using BM25S tokenizer with Stemmer to create the index")
-    stemmer = Stemmer.Stemmer("english")
+    print("Using BM25S tokenizer to create the bm25s index")
+    # print("Using BM25S tokenizer with Stemmer to create the index")
+    # stemmer = Stemmer.Stemmer("english")
     tokenizer = bm25s.tokenization.Tokenizer(
         # stemmer=stemmer, 
-        stopwords=None,
+        # stopwords=None,
         )
     corpus_tokenized = tokenizer.tokenize(concept_aliases, return_as="string",)
     
@@ -94,16 +98,6 @@ def create_tfidf_index(
     # splade_model = AutoModelForMaskedLM.from_pretrained("naver/splade-cocondenser-ensembledistil")
     # splade_model.eval()
     # corpus_tokenized = [get_splade_sparse_vector(text, tokenizer, splade_model) for text in concept_aliases]
-
-
-    # print(type(corpus_tokenized))
-    # for token in corpus_tokenized:
-    #     if type(token) != str:
-    #         print(type(token))
-    #         print(token)
-    # corpus_tokenized=[]
-    # for alias in tqdm(concept_aliases,): 
-    #     corpus_tokenized.append(tokenizer.tokenize(alias, leave_progress=False))
 
     k1=2.0
     b=1.2
@@ -118,6 +112,7 @@ def create_tfidf_index(
     #     print(x)
 
     model.index(corpus_tokenized, leave_progress=True)
+    
     saving_start = datetime.datetime.now()
     model.save(output_path)
     saving_end = datetime.datetime.now()
