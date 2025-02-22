@@ -58,25 +58,25 @@ def create_tfidf_index(
     print(f"Saving concept aliases to {umls_concept_aliases_path}")
     json.dump(concept_aliases, open(umls_concept_aliases_path, "w"))
     
-    if not os.path.exists(dense_index_path):
-        print("Creating FAISS index...")
-        # Generate embeddings for concepts
-        concept_vectors = np.array([get_embedding(text) for text in tqdm(concept_aliases, leave=True)])
+    # if not os.path.exists(dense_index_path):
+    #     print("Creating FAISS index...")
+    #     # Generate embeddings for concepts
+    #     concept_vectors = np.array([get_embedding(text) for text in tqdm(concept_aliases, leave=True)])
         
-        # Create FAISS index (L2 distance)
-        print("Creating FAISS index...")
-        dimension = concept_vectors.shape[1]
-        faiss_index = faiss.IndexFlatL2(dimension)
-        faiss_index.add(concept_vectors)
+    #     # Create FAISS index (L2 distance)
+    #     print("Creating FAISS index...")
+    #     dimension = concept_vectors.shape[1]
+    #     faiss_index = faiss.IndexFlatL2(dimension)
+    #     faiss_index.add(concept_vectors)
 
-        # Save FAISS index
-        print(f"Saving FAISS index.")
-        faiss.write_index(faiss_index, os.path.join(output_path, "faiss_index.bin"))
-    # np.save(os.path.join(output_path, "umls_concepts.npy"), np.array(concept_aliases))
-    else:
-        print(f"✅ FAISS index already exists at {dense_index_path}")
+    #     # Save FAISS index
+    #     print(f"Saving FAISS index.")
+    #     faiss.write_index(faiss_index, os.path.join(output_path, "faiss_index.bin"))
+    # # np.save(os.path.join(output_path, "umls_concepts.npy"), np.array(concept_aliases))
+    # else:
+    #     print(f"✅ FAISS index already exists at {dense_index_path}")
 
-    print("✅ FAISS index created and saved.")
+    # print("✅ FAISS index created and saved.")
 
     # Test txtai tokenizer
     # print("Using txtai tokenizer with BM25S algorithm to create the index")

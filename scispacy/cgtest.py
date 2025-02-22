@@ -237,28 +237,27 @@ class CandidateGenerator:
         self.concept_aliases = ann_concept_aliases_list or json.load(
             open(cached_path(linker_paths.concept_aliases_list))
         )
-        self.faiss_index_path = "data/faiss_index.bin"
+        self.allowed_faiss_models = ["BFL2", "HNSW"]
+        
+        self.faiss_model = "HNSW"
+        if self.faiss_model not in self.allowed_faiss_models:
+            raise ValueError(
+                f"Invalid FAISS model: {self.faiss_model}. Choose from {self.allowed_faiss_models}"
+            )
+        self.faiss_index_path = f"data/{self.faiss_model}_faiss_index.bin"  
+        print(f"🔍 Using FAISS model: {self.faiss_model}")
         # self.faiss_index = self.load_faiss_index()
         
         # ✅ FIX: Ensure self.embedding_cache is properly initialized as an empty dictionary
         self.embedding_cache = {}  # 🚀 Prevents "AttributeError"
-        # Precompute embeddings for each alias just once
-        self.alias_embeddings = self._precompute_alias_embeddings()
 
         self.kb = kb or DEFAULT_KNOWLEDGE_BASES[name]()
         self.verbose = verbose
 
         # TODO(Mark): Remove in scispacy v1.0.
         self.umls = self.kb
-        self.k_bm25 = 30
-        print(f"Number of candidates: {self.k_bm25}")
-        
-    def _precompute_alias_embeddings(self) -> Dict[str, np.ndarray]:
-        alias_embs = {}
-        for alias in self.concept_aliases:
-            # Reuse the same get_or_cache_embedding
-            alias_embs[alias] = self.get_or_cache_embedding(alias)
-        return alias_embs
+        self.k_bm25 = 35
+        self.k_faiss = 15
 
     def nmslib_knn_with_zero_vectors(
         self, vectors: numpy.ndarray, k: int
@@ -311,103 +310,12 @@ class CandidateGenerator:
 
         return extended_neighbors, extended_distances
         
-
-    # def __call__(
-    #     self, mention_texts: List[str], k: int
-    # ) -> List[List[MentionCandidate]]:
-        """
-        Given a list of mention texts, returns a list of candidate neighbors.
-
-        NOTE: Because we include canonical name aliases in the ann index, the list
-        of candidates returned will not necessarily be of length k for each candidate,
-        because we then map these to canonical ids only.
-
-        NOTE: For a given mention, the returned candidate list might be empty, which implies that
-        the tfidf vector for this mention was all zeros (i.e there were no 3 gram overlaps). This
-        happens reasonably rarely, but does occasionally.
-        Parameters
-        ----------
-        mention_texts: List[str], required.
-            The list of mention strings to generate candidates for.
-        k: int, required.
-            The number of ann neighbours to look up.
-            Note that the number returned may differ due to aliases.
-
-        Returns
-        -------
-        A list of MentionCandidate objects per mention containing KB concept_ids and aliases
-        and distances which were mapped to. Note that these are lists for each concept id,
-        because the index contains aliases which are canonicalized, so multiple values may map
-        to the same canonical id.
-        """
-        # if self.verbose:
-        #     print(f"Generating candidates for {len(mention_texts)} mentions")
-
-        # start_time = datetime.datetime.now()
-        # # tfidf vectorizer crashes on an empty array, so we return early here
-        # if mention_texts == []:
-        #     return []
         
-        # bm25s tokenizer
-        # stemmer = Stemmer.Stemmer("english")
-        # tokenizer = bm25s.tokenization.Tokenizer(
-            # stemmer=stemmer, 
-            # stopwords=None,
-            # )
-        # query_tokenized = tokenizer.tokenize(mention_texts, return_as="string",)
-        
-
-        # SPLADE tokenizer and model: FAILS BC WE CANT ACCESS HUGGING FACE
-        # tokenizer = AutoTokenizer.from_pretrained("naver/splade-cocondenser-ensembledistil")
-        # splade_model = AutoModelForMaskedLM.from_pretrained("naver/splade-cocondenser-ensembledistil")
-        # splade_model.eval()
-        # queries_tokenized = [get_splade_sparse_vector(text, tokenizer, splade_model) for text in mention_texts]
-
-        # TXTAI tokenizer
-        # tokenizer = Tokenizer()
-        # queries_tokenized = [tokenizer(x) for x in mention_texts]
-
-        # end_time = datetime.datetime.now()
-        # total_time = end_time - start_time
-
-        # self.verbose= False
-        # if self.verbose:
-        #     print(f"Mention texts is {mention_texts}")
-        #     print(f"Mention texts token is {query_tokenized}")
-        #     print(f"Finding neighbors took {total_time.total_seconds()} seconds")
-        
-        # batch_mention_candidates = []
-        # for neighbors, distances in zip(batch_neighbors, batch_distances):
-        #     if neighbors is None:
-        #         neighbors = []
-        #     if distances is None:
-        #         distances = []
-
-        #     concept_to_mentions: Dict[str, List[str]] = defaultdict(list)
-        #     concept_to_similarities: Dict[str, List[float]] = defaultdict(list)
-        #     for neighbor_index, distance in zip(neighbors, distances):
-        #         mention = self.ann_concept_aliases_list[neighbor_index]
-        #         concepts_for_mention = self.kb.alias_to_cuis[mention]
-        #         for concept_id in concepts_for_mention:
-        #             concept_to_mentions[concept_id].append(mention)
-        #             concept_to_similarities[concept_id].append(1.0 - distance)
-
-        #     mention_candidates = [
-        #         MentionCandidate(concept, mentions, concept_to_similarities[concept])
-        #         for concept, mentions in concept_to_mentions.items()
-        #     ]
-        #     mention_candidates = sorted(mention_candidates, key=lambda c: c.concept_id)
-
-        #     batch_mention_candidates.append(mention_candidates)
-
-        # return batch_mention_candidates
-    def __call__(self, mention_texts: List[str], k: int = 20) -> List[List[MentionCandidate]]:
+    def __call__(self, mention_texts: List[str], k: int) -> List[List[MentionCandidate]]:
 
         if self.verbose:
             print(f"Generating candidates for {len(mention_texts)} mentions")
-
-        start_time = datetime.datetime.now()
-
+            
         if not mention_texts:
             return []
 
@@ -416,9 +324,78 @@ class CandidateGenerator:
 
         # **Step 1️⃣: Retrieve top-K BM25 candidates**
         bm25_results, _ = self.bm25_index.retrieve(query_tokenized, k=self.k_bm25, backend_selection="numba")
-
+        if self.verbose:
+            print(f"Generated BM25 {len(self.k_bm25,)} candidates: {bm25_results}")
+        
+        return self.temporary_faiss_index(mention_texts, bm25_results, self.k_faiss)
+            
+    def index_faiss_persistent(self, mention_texts, bm25_results):
+        start_time = datetime.datetime.now()
         batch_mention_candidates = []
+        for mention, bm25_candidate_indices in zip(mention_texts, bm25_results):
+            # Step 1️⃣: Get BM25 candidate vectors
+            candidate_concepts = [self.concept_aliases[idx] for idx in bm25_candidate_indices]
+            candidate_vectors = np.array([get_embedding(text) for text in candidate_concepts])
+            
+            if candidate_vectors.shape[0] == 0 or candidate_vectors.ndim != 2:
+                batch_mention_candidates.append([])
+                continue  # Skip if no valid vectors
 
+            # Step 2️⃣: Get FAISS Indices for BM25 Candidates
+            candidate_indices = np.array(bm25_candidate_indices, dtype=np.int64)
+            candidate_ids = np.array(bm25_candidate_indices, dtype=np.int64)  # ✅ Convert BM25 indices to NumPy array
+
+
+            # Step 3️⃣: Restrict FAISS Search to BM25 Candidates
+            distances, indices = self.faiss_index.search(query_vector, k=min(self.k_faiss, len(candidate_ids)))
+
+            # sub_faiss_index = faiss.IndexIDMap2(self.faiss_index)  # ✅ Wrap FAISS index
+            # sub_faiss_index.add_with_ids(candidate_vectors, candidate_indices)  # ✅ Restrict to BM25
+            
+            # **Step 4️⃣: Filter results only to BM25 candidates**
+            filtered_indices = [idx for idx in indices[0] if idx in candidate_ids]
+            if not filtered_indices:
+                batch_mention_candidates.append([])
+                continue  # Skip if FAISS found no valid candidates
+
+            # **Step 5️⃣: Map FAISS-ranked indices back to concepts**
+            ranked_results = [candidate_concepts[np.where(candidate_ids == idx)[0][0]] for idx in filtered_indices]
+
+            # **Step 6️⃣: Format Output with Similarities**
+            concept_to_mentions = defaultdict(list)
+            concept_to_similarities = defaultdict(list)
+
+            # Step 4️⃣: Search FAISS only within BM25 Candidates
+            query_vector = np.array([get_embedding(mention)])
+            distances, indices = sub_faiss_index.search(query_vector, k=min(self.k_faiss, len(candidate_indices)))
+
+            # Step 5️⃣: Map Results Back to Concepts
+            ranked_results = [candidate_concepts[idx] for idx in indices[0] if idx < len(candidate_concepts)]
+
+            # Step 6️⃣: Format Output
+            concept_to_mentions = defaultdict(list)
+            concept_to_similarities = defaultdict(list)
+            for ranked_concept, distance in zip(ranked_results, distances[0]):
+                concept_ids = self.kb.alias_to_cuis[ranked_concept]
+                similarity = 1.0 / (1.0 + distance)  # Convert FAISS L2 distance to similarity
+                for concept_id in concept_ids:
+                    concept_to_mentions[concept_id].append(ranked_concept)
+                    concept_to_similarities[concept_id].append(similarity)
+
+            mention_candidates = [
+                MentionCandidate(concept, aliases, concept_to_similarities[concept])
+                for concept, aliases in concept_to_mentions.items()
+            ]
+
+            batch_mention_candidates.append(mention_candidates)
+        end_time = datetime.datetime.now()
+        if self.verbose:
+            print(f"Processed {len(mention_texts)} mentions in {end_time - start_time}")
+        return batch_mention_candidates
+        
+    def temporary_faiss_index(self, mention_texts, bm25_results, k):
+        start_time = datetime.datetime.now()
+        batch_mention_candidates = []
         for mention, bm25_candidate_indices in zip(mention_texts, bm25_results):
             # **Step 2️⃣: Get BM25 candidate concepts**
             if bm25_candidate_indices.size == 0:
@@ -428,23 +405,29 @@ class CandidateGenerator:
             candidate_concepts = [self.concept_aliases[idx] for idx in bm25_candidate_indices]
 
             # **Step 3️⃣: Get candidate vectors (FAISS input)**
-            candidate_vectors = np.array([self.alias_embeddings[text] for text in candidate_concepts])
+            candidate_vectors = np.array([get_embedding(text) for text in candidate_concepts])
 
             # **Edge Case: If all vectors are zero (empty embedding), skip FAISS ranking**
             if candidate_vectors.shape[0] == 0 or candidate_vectors.ndim != 2:
                 batch_mention_candidates.append([])
                 continue
+            
+            # **Step 5️⃣: Convert query to dense embedding**
+            query_vector = np.array([get_embedding(mention)])
 
             # **Step 4️⃣: Create a temporary FAISS index with BM25 candidates**
             dimension = candidate_vectors.shape[1]
+            # M = 32  # Number of neighbors in HNSW graph (typical choice)
+            # temp_faiss_index = faiss.IndexHNSWFlat(dimension, M, faiss.METRIC_L2)
+            
+            # Using FlatL2 for brute-force search
             temp_faiss_index = faiss.IndexFlatL2(dimension)
-            temp_faiss_index.add(candidate_vectors)  # ✅ Only adding BM25 results to FAISS
 
-            # **Step 5️⃣: Convert query to dense embedding**
-            query_vector = np.array([self.get_or_cache_embedding(mention)])
-
+            # temp_faiss_index.add(candidate_vectors)  # ✅ Only adding BM25 results to FAISS
+ 
             # **Step 6️⃣: Search FAISS ONLY within BM25 Candidates**
-            distances, indices = temp_faiss_index.search(query_vector, k=min(k, len(candidate_vectors)))
+            distances, indices = temp_faiss_index.search(query_vector, k=min(self.k_faiss, len(candidate_vectors)))
+            # distances, indices = temp_faiss_index.search(query_vector, k=min(k, len(candidate_vectors)))
 
             # **Fix: Ensure indices are valid**
             valid_indices = [idx for idx in indices[0] if idx < len(candidate_concepts)]
@@ -477,54 +460,27 @@ class CandidateGenerator:
         end_time = datetime.datetime.now()
         if self.verbose:
             print(f"Processed {len(mention_texts)} mentions in {end_time - start_time}")
-
         return batch_mention_candidates
     
-    def get_or_cache_embedding(self, text_input) -> np.ndarray:
-        """
-        text_input can be either a str or a spaCy Span object.
-        Convert consistently to a string, then optionally normalize it.
-        """
-        if hasattr(text_input, "text"):  # if it's a spaCy Span or Token
-            text_input = text_input.text
-
-        # Example normalization: strip whitespace
-        text_key = text_input.strip()
-
-        # If your pipeline is case-insensitive, you might do:
-        # text_key = text_key.lower()
-
-        # Now check the cache
-        if text_key in self.embedding_cache:
-            return self.embedding_cache[text_key]
-
-        vector = get_embedding(text_key)
-        self.embedding_cache[text_key] = vector
-        return vector
-
-
     def load_faiss_index(self) -> faiss.Index:
         """
-        Load a FAISS index from disk if it exists. Otherwise, create and save a new one.
-
-        Returns
-        -------
-        faiss.Index
-            A FAISS index (either loaded or newly created).
+        Load or create FAISS index using HNSW for faster ANN search.
         """
         if os.path.exists(self.faiss_index_path):
-            print(f"✅ FAISS index found at {self.faiss_index_path}, loading...")
+            print(f"✅ Loading FAISS index from {self.faiss_index_path}")
             faiss_index = faiss.read_index(self.faiss_index_path)
         else:
-            print(f"⚠️ FAISS index not found, creating a new one...")
-
+            print(f"⚠️ FAISS index  using {self.faiss_model} not found, creating a new one...")
             # Load UMLS concepts and their embeddings
-            concept_vectors = np.array([self.get_or_cache_embedding(text) for text in self.concept_aliases])
-            
-            # Create FAISS index with ANN support
+            concept_vectors = np.array([get_embedding(text) for text in self.concept_aliases])
             dimension = concept_vectors.shape[1]
-            base_index = faiss.IndexHNSWFlat(dimension, 32)  # 🔥 HNSW (Hierarchical Navigable Small World)
-            faiss_index = faiss.IndexIDMap2(base_index)  # ✅ Allows storing explicit IDs
+            if self.faiss_model == "BFL2":
+                base_index = faiss.IndexFlatL2(dimension, 32)
+            elif self.faiss_model == "HNSW":
+                # ✅ Use FAISS HNSW for Approximate Nearest Neighbors (faster than brute-force L2)
+                base_index = faiss.IndexHNSWFlat(dimension, 32)
+               
+            faiss_index = faiss.IndexIDMap2(base_index)  # ✅ Allows explicit ID mapping
             
             # Assign unique IDs to each concept
             ids = np.arange(len(concept_vectors), dtype=np.int64)
@@ -533,59 +489,12 @@ class CandidateGenerator:
             # Save for future use
             print(f"💾 Saving FAISS index to {self.faiss_index_path}")
             faiss.write_index(faiss_index, self.faiss_index_path)
+            
+            
+        # **Fix: Only wrap if not already an IndexIDMap2**
+        if not isinstance(faiss_index, faiss.IndexIDMap2):
+            print("⚠️ Wrapping FAISS index in IndexIDMap2...")
+            faiss_index = faiss.IndexIDMap2(faiss_index)
 
         print(f"🔄 FAISS index contains {faiss_index.ntotal} vectors")
         return faiss_index
-    
-    # def __call__(self, mention_texts: List[str], k: int = 40) -> List[List[MentionCandidate]]:
-    #     if not mention_texts:
-    #         return []
-        
-    #     # 1) Embed all mention_texts in a single batch:
-    #     mention_vectors = np.array([self._get_or_cache_embedding(text) for text in mention_texts])
-        
-    #     # 2) FAISS search in one shot:
-    #     distances, indices = self.faiss_index.search(mention_vectors, k)
-
-    #     # 3) Re-rank or BM25? (Optional)
-    #     #    If you still need BM25 in combination, you can do a second pass for the top few results, etc.
-
-    #     # 4) Convert results to your mention-candidate structure
-    #     results = []
-    #     for row_idx, row_indices in enumerate(indices):
-    #         mention_candidates = []
-    #         for col_idx, alias_idx in enumerate(row_indices):
-    #             if alias_idx < 0 or alias_idx >= len(self.concept_aliases):
-    #                 continue
-    #             alias_text = self.concept_aliases[alias_idx]
-    #             concept_ids = self.kb.alias_to_cuis[alias_text]
-                
-    #             # L2 distance -> similarity
-    #             dist = distances[row_idx][col_idx]
-    #             similarity = 1.0 / (1.0 + dist)  # or 1 - dist if it's cosine
-                
-    #             for cid in concept_ids:
-    #                 # You could store multiple similarities if multiple alias matches occur
-    #                 mention_candidates.append(
-    #                     MentionCandidate(cid, [alias_text], [similarity])
-    #                 )
-            
-    #         # Possibly group by concept_id if you want to combine multiple aliases
-    #         # ...
-    #         results.append(mention_candidates)
-    #     return results
-        
-
-# def get_splade_sparse_vector(text, tokenizer, splade_model):
-#     inputs = tokenizer(text, return_tensors="pt")
-#     with torch.no_grad():
-#         outputs = splade_model(**inputs).logits  # Get token probabilities
-
-#     # Extract token IDs and their importance scores
-#     token_ids = inputs.input_ids.squeeze().tolist()
-#     token_probs = torch.max(outputs, dim=-1).values.squeeze().tolist()
-
-#     # Keep only important words with a probability threshold
-#     sparse_vector = {tokenizer.decode([tid]): prob for tid, prob in zip(token_ids, token_probs) if prob > 0.5}
-    
-#     return sparse_vector
