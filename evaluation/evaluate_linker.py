@@ -10,7 +10,7 @@ from datetime import datetime
 EVALUATION_FOLDER_PATH = os.path.dirname(os.path.abspath(__file__))
 
 
-def main():
+def main(alpha):
     print(f"Running script at {datetime.now()}")
     nlp = spacy.load("en_core_sci_sm")
     nlp.add_pipe(
@@ -44,7 +44,7 @@ def main():
 
         # 2) Call candidate_generator ONCE for all spans
         # NOTE: If you want fewer candidates (e.g., 25), just change k=25
-        batched_candidates = linker.candidate_generator(spans, k=40)
+        batched_candidates = linker.candidate_generator(spans, alpha=alpha, k=40)
 
         # (3) Loop over each mention's candidates
         for (start, end, label), mention_candidates in zip(entities["entities"], batched_candidates):
@@ -66,14 +66,9 @@ def main():
     #         sorted_candidates = sorted(
     #             candidates, reverse=True, key=lambda x: max(x.similarities)
     #         )
-             # Extract the actual mention text for re-ranking
-            mention_text = text_doc[start:end]
-
-            # (4) Apply your custom heuristic re-ranker
-            mention_candidates = re_rank_combo(mention_text, mention_candidates)
 
             # (5) Now evaluate recall at 1,2,10...
-            candidate_ids = [c.concept_id for c in mention_candidates]
+            candidate_ids = [c.concept_id for c in sorted_candidates]
             # candidate_ids = [c.concept_id for c in sorted_candidates]
             
             # Evaluate different recall cutoffs
@@ -133,72 +128,8 @@ def main():
     # )
     print(f"Ending script at {datetime.now()}")
 
-def re_rank_combo(mention_text, candidates):
-    # Step 1: exact-match re-rank
-    candidates = re_rank_heuristic(mention_text, candidates)
-    # Step 2: apply overlap re-rank
-    candidates = re_rank_overlap(mention_text, candidates)
-    return candidates
-
-def re_rank_heuristic(mention_text: str, candidates: List[MentionCandidate]) -> List[MentionCandidate]:
-    # Normalize mention text
-    mention_norm = mention_text.strip().lower()
-
-    # We'll store new "boosted" scores in a dictionary
-    # You could combine these with the original candidate.similarities if you want.
-    candidate_scores = []
-    for candidate in candidates:
-        # By default, let's pick some baseline score from the candidate
-        # e.g., the max similarity from candidate.similarities:
-        base_score = max(candidate.similarities) if candidate.similarities else 0.0
-
-        # Check if EXACT match in any of the aliases
-        # (You might apply .lower() to candidate alias too)
-        alias_match = any(mention_norm == alias.strip().lower() for alias in candidate.aliases)
-
-        # If exact alias match, we boost score
-        if alias_match:
-            boosted_score = base_score + 2.0  # or some other constant
-        else:
-            boosted_score = base_score
-
-        candidate_scores.append((candidate, boosted_score))
-
-    # Sort by boosted score descending
-    candidate_scores.sort(key=lambda x: x[1], reverse=True)
-
-    # Return the reordered candidates
-    return [c for c, _ in candidate_scores]
-
-import re
-
-def re_rank_overlap(mention_text: str, candidates: List[MentionCandidate]) -> List[MentionCandidate]:
-    # Tokenize mention & candidate aliases. 
-    # For a simple approach, split by non-alphabetic characters:
-    mention_tokens = re.findall(r"[a-z0-9]+", mention_text.lower())
-
-    candidate_scores = []
-    for candidate in candidates:
-        # Base similarity
-        base_score = max(candidate.similarities) if candidate.similarities else 0.0
-
-        # Check token overlap for each alias (some candidates have multiple aliases)
-        best_alias_overlap = 0
-        for alias in candidate.aliases:
-            alias_tokens = re.findall(r"[a-z0-9]+", alias.lower())
-            # Overlap = count of mention_tokens ∩ alias_tokens
-            overlap_count = len(set(mention_tokens).intersection(alias_tokens))
-            if overlap_count > best_alias_overlap:
-                best_alias_overlap = overlap_count
-
-        # We'll combine base_score + overlap_count, or any weighting you like
-        total_score = base_score + best_alias_overlap
-        candidate_scores.append((candidate, total_score))
-
-    # Sort in descending order of the combined score
-    candidate_scores.sort(key=lambda x: x[1], reverse=True)
-    return [c for c, _ in candidate_scores]
-
-
 if __name__ == "__main__":
-    main()
+    alphas = [0.15, 0.18, 0.2, 0.22, 0.25, 0.28, 0.3]
+    for alpha in alphas:
+        print(f"Running evaluation with alpha={alpha}")
+        main(alpha)

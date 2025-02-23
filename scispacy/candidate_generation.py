@@ -204,7 +204,6 @@ class CandidateGenerator:
     name: str, optional (default = None)
         The name of the pretrained entity linker to load. Must be one of 'umls' or 'mesh'.
     """
-
     def __init__(
         self,
         index = None,
@@ -250,8 +249,8 @@ class CandidateGenerator:
 
         # TODO(Mark): Remove in scispacy v1.0.
         self.umls = self.kb
-        self.k_bm25 = 30
-        print(f"Number of candidates: {self.k_bm25}")
+        self.k_bm25 = 40
+        print(f"Number of BM25 candidates: {self.k_bm25}")
         
     def _precompute_alias_embeddings(self) -> Dict[str, np.ndarray]:
         alias_embs = {}
@@ -401,7 +400,7 @@ class CandidateGenerator:
         #     batch_mention_candidates.append(mention_candidates)
 
         # return batch_mention_candidates
-    def __call__(self, mention_texts: List[str], k: int = 20) -> List[List[MentionCandidate]]:
+    def __call__(self, mention_texts: List[str], alpha, k: int = 20, ) -> List[List[MentionCandidate]]:
 
         if self.verbose:
             print(f"Generating candidates for {len(mention_texts)} mentions")
@@ -410,69 +409,94 @@ class CandidateGenerator:
 
         if not mention_texts:
             return []
-
+    
+        # 1) Tokenize for BM25
         tokenizer = bm25s.tokenization.Tokenizer()
         query_tokenized = tokenizer.tokenize(mention_texts, return_as="string")
 
-        # **Step 1️⃣: Retrieve top-K BM25 candidates**
-        bm25_results, _ = self.bm25_index.retrieve(query_tokenized, k=self.k_bm25, backend_selection="numba")
+        # 2) Retrieve top-K from BM25, capturing doc indices AND BM25 scores
+        bm25_results, bm25_scores = self.bm25_index.retrieve(
+            query_tokenized, 
+            k=self.k_bm25, 
+            backend_selection="numba", 
+            # return_scores=True  # <--- Make sure your bm25 library supports this
+        )
 
         batch_mention_candidates = []
-
-        for mention, bm25_candidate_indices in zip(mention_texts, bm25_results):
-            # **Step 2️⃣: Get BM25 candidate concepts**
-            if bm25_candidate_indices.size == 0:
+        # 3) Loop per mention
+        for mention, cand_bm25_indices, cand_bm25_scores in zip(mention_texts, bm25_results, bm25_scores):
+            
+            if cand_bm25_indices.size == 0:
                 batch_mention_candidates.append([])
                 continue  # Skip if BM25 found no candidates
+            
+            # Step A: Gather the candidate alias strings
+            candidate_concepts = [self.concept_aliases[idx] for idx in cand_bm25_indices]
 
-            candidate_concepts = [self.concept_aliases[idx] for idx in bm25_candidate_indices]
+            # Step B: Get precomputed embeddings for each alias
+            candidate_vectors = np.array([self.alias_embeddings[alias] for alias in candidate_concepts])
 
-            # **Step 3️⃣: Get candidate vectors (FAISS input)**
-            candidate_vectors = np.array([self.alias_embeddings[text] for text in candidate_concepts])
-
-            # **Edge Case: If all vectors are zero (empty embedding), skip FAISS ranking**
+            #Edge Case: If all vectors are zero (empty embedding), skip FAISS ranking
             if candidate_vectors.shape[0] == 0 or candidate_vectors.ndim != 2:
                 batch_mention_candidates.append([])
                 continue
 
-            # **Step 4️⃣: Create a temporary FAISS index with BM25 candidates**
+            # Step C: Build a small FAISS index for these BM25 candidates
             dimension = candidate_vectors.shape[1]
             temp_faiss_index = faiss.IndexFlatL2(dimension)
             temp_faiss_index.add(candidate_vectors)  # ✅ Only adding BM25 results to FAISS
 
-            # **Step 5️⃣: Convert query to dense embedding**
+            # Step D: Embed the mention text
             query_vector = np.array([self.get_or_cache_embedding(mention)])
 
-            # **Step 6️⃣: Search FAISS ONLY within BM25 Candidates**
+            # Step E: FAISS search for top-k among these BM25 candidates
             distances, indices = temp_faiss_index.search(query_vector, k=min(k, len(candidate_vectors)))
 
-            # **Fix: Ensure indices are valid**
-            valid_indices = [idx for idx in indices[0] if idx < len(candidate_concepts)]
-            if not valid_indices:
+            # Re-map FAISS ranks to concept strings
+            valid_indices = indices[0]
+            if len(valid_indices) == 0:
                 batch_mention_candidates.append([])
                 continue  # Skip if FAISS found no valid candidates
+            ranked_results = [candidate_concepts[i] for i in valid_indices]
+            ranked_distances = distances[0]
 
-            # **Step 7️⃣: Map FAISS-ranked indices back to concepts**
-            ranked_results = [candidate_concepts[idx] for idx in valid_indices]
+            # Step F: Convert distance -> FAISS similarity
+            faiss_sims = [1.0/(1.0 + d) for d in ranked_distances]
+            
+            # Step G: Combine with BM25 scores
+            #    Remember, 'valid_indices' is the sub-rank in this candidate list
+            #    For each i in valid_indices, we want to find cand_bm25_scores[i]
+            combined_scores = []
+            for i, (alias_str, sim_faiss) in zip(valid_indices, zip(ranked_results, faiss_sims)):
+                if self.verbose:
+                    print(f"The index is {i}")
+                bm25_score = cand_bm25_scores[i]
+                # Weighted sum
+                final_score = alpha*bm25_score + (1 - alpha)*sim_faiss
+                combined_scores.append((alias_str, i, final_score))
+                
+            # Step H: Sort by final_score descending
+            combined_scores.sort(key=lambda x: x[2], reverse=True)
 
-            # **Step 8️⃣: Format Output with Similarities**
+            # Step I: Convert to MentionCandidates
             concept_to_mentions = defaultdict(list)
             concept_to_similarities = defaultdict(list)
-
-            for ranked_concept, distance in zip(ranked_results, distances[0][:len(valid_indices)]):
-                concept_ids = self.kb.alias_to_cuis[ranked_concept]
-                similarity = 1.0 / (1.0 + distance)  # Convert FAISS L2 distance to similarity
-
-                for concept_id in concept_ids:
-                    concept_to_mentions[concept_id].append(ranked_concept)
-                    concept_to_similarities[concept_id].append(similarity)
+            
+            for alias_str, alias_idx, final_score in combined_scores:
+                concept_ids = self.kb.alias_to_cuis[alias_str]
+                for cid in concept_ids:
+                    concept_to_mentions[cid].append(alias_str)
+                    # We store final_score as the "similarity" for simplicity
+                    concept_to_similarities[cid].append(final_score)
 
             mention_candidates = [
-                MentionCandidate(concept, aliases, concept_to_similarities[concept])
-                for concept, aliases in concept_to_mentions.items()
+                MentionCandidate(concept_id, aliases, concept_to_similarities[concept_id])
+                for concept_id, aliases in concept_to_mentions.items()
             ]
-
-            batch_mention_candidates.append(mention_candidates)
+            
+            # (4) Apply your custom heuristic re-ranker
+            mention_candidates = re_rank_combo(mention, mention_candidates)
+            batch_mention_candidates.append(mention_candidates)            
 
         end_time = datetime.datetime.now()
         if self.verbose:
@@ -536,6 +560,73 @@ class CandidateGenerator:
 
         print(f"🔄 FAISS index contains {faiss_index.ntotal} vectors")
         return faiss_index
+    
+def re_rank_combo(mention_text, candidates):
+    # Step 1: exact-match re-rank
+    candidates = re_rank_heuristic(mention_text, candidates)
+    # Step 2: apply overlap re-rank
+    candidates = re_rank_overlap(mention_text, candidates)
+    return candidates
+
+def re_rank_heuristic(mention_text: str, candidates: List[MentionCandidate]) -> List[MentionCandidate]:
+    # Normalize mention text
+    mention_norm = mention_text.strip().lower()
+
+    # We'll store new "boosted" scores in a dictionary
+    # You could combine these with the original candidate.similarities if you want.
+    candidate_scores = []
+    for candidate in candidates:
+        # By default, let's pick some baseline score from the candidate
+        # e.g., the max similarity from candidate.similarities:
+        base_score = max(candidate.similarities) if candidate.similarities else 0.0
+
+        # Check if EXACT match in any of the aliases
+        # (You might apply .lower() to candidate alias too)
+        alias_match = any(mention_norm == alias.strip().lower() for alias in candidate.aliases)
+
+        # If exact alias match, we boost score
+        if alias_match:
+            boosted_score = base_score + 2.0  # or some other constant
+        else:
+            boosted_score = base_score
+
+        candidate_scores.append((candidate, boosted_score))
+
+    # Sort by boosted score descending
+    candidate_scores.sort(key=lambda x: x[1], reverse=True)
+
+    # Return the reordered candidates
+    return [c for c, _ in candidate_scores]
+
+import re
+
+def re_rank_overlap(mention_text: str, candidates: List[MentionCandidate]) -> List[MentionCandidate]:
+    # Tokenize mention & candidate aliases. 
+    # For a simple approach, split by non-alphabetic characters:
+    mention_tokens = re.findall(r"[a-z0-9]+", mention_text.lower())
+
+    candidate_scores = []
+    for candidate in candidates:
+        # Base similarity
+        base_score = max(candidate.similarities) if candidate.similarities else 0.0
+
+        # Check token overlap for each alias (some candidates have multiple aliases)
+        best_alias_overlap = 0
+        for alias in candidate.aliases:
+            alias_tokens = re.findall(r"[a-z0-9]+", alias.lower())
+            # Overlap = count of mention_tokens ∩ alias_tokens
+            overlap_count = len(set(mention_tokens).intersection(alias_tokens))
+            if overlap_count > best_alias_overlap:
+                best_alias_overlap = overlap_count
+
+        # We'll combine base_score + overlap_count, or any weighting you like
+        total_score = base_score + best_alias_overlap
+        candidate_scores.append((candidate, total_score))
+
+    # Sort in descending order of the combined score
+    candidate_scores.sort(key=lambda x: x[1], reverse=True)
+    return [c for c, _ in candidate_scores]
+
     
     # def __call__(self, mention_texts: List[str], k: int = 40) -> List[List[MentionCandidate]]:
     #     if not mention_texts:
