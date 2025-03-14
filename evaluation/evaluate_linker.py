@@ -10,8 +10,13 @@ from datetime import datetime
 EVALUATION_FOLDER_PATH = os.path.dirname(os.path.abspath(__file__))
 
 
-def main(alpha):
-    print(f"Running script at {datetime.now()}")
+def main(
+        # mention_texts: List[str], 
+        re_rank_overlap_constant: float,
+        re_rank_heuristic_constant: float,
+        alpha: float = 0.2, 
+        k: int = 20, 
+    ):
     nlp = spacy.load("en_core_sci_sm")
     nlp.add_pipe(
         "scispacy_linker", config={"resolve_abbreviations": True, "linker_name": "umls"}
@@ -22,6 +27,7 @@ def main(alpha):
         # os.path.join(EVALUATION_FOLDER_PATH, os.pardir, "data", "med_mentions"),
         "/home/kgvz782/projects/scispacy/data/med_mentions/med_mentions.tar.gz",
         use_umls_ids=True,
+        keep_files=True,
     )
 
     test_data = med_mentions[2]
@@ -44,7 +50,13 @@ def main(alpha):
 
         # 2) Call candidate_generator ONCE for all spans
         # NOTE: If you want fewer candidates (e.g., 25), just change k=25
-        batched_candidates = linker.candidate_generator(spans, alpha=alpha, k=40)
+        batched_candidates = linker.candidate_generator(
+            mention_texts=spans, 
+            re_rank_heuristic_constant=re_rank_heuristic_constant,
+            re_rank_overlap_constant=re_rank_overlap_constant,
+            k=40,
+            
+            )
 
         # (3) Loop over each mention's candidates
         for (start, end, label), mention_candidates in zip(entities["entities"], batched_candidates):
@@ -53,9 +65,10 @@ def main(alpha):
                 total_entities += 1
                 continue
             
-            sorted_candidates = sorted(
-                mention_candidates, reverse=True, key=lambda x: max(x.similarities)
-            )
+            # sorted_candidates = sorted(
+            #     mention_candidates, reverse=True, key=lambda x: max(x.similarities)
+            # )
+            sorted_candidates = mention_candidates
     #     # for start, end, label in tqdm(entities["entities"], leave=True):
     #     for start, end, label in entities["entities"]:
             
@@ -126,10 +139,51 @@ def main(alpha):
     #     "Recall at 100: ",
     #     correct_at_100 / total_entities,
     # )
-    print(f"Ending script at {datetime.now()}")
 
 if __name__ == "__main__":
-    alphas = [0.15, 0.18, 0.2, 0.22, 0.25, 0.28, 0.3]
-    for alpha in alphas:
-        print(f"Running evaluation with alpha={alpha}")
-        main(alpha)
+    print(f"Running script at {datetime.now()}")
+    # print("**************************************")
+    # print("Testing re-rank-heuristic constant")
+    # print("**************************************")
+    # re_rank_heuristic_constants = [
+    #     10,
+    #     # 20,
+    #     # 30,
+    #     # 40,
+    #     # 50
+    #     ]
+    # for c in re_rank_heuristic_constants:
+    #     print(f"Running evaluation with re-rank-heuristic constant ={c}")
+    #     main(
+    #         re_rank_heuristic_constant=c,
+    #         re_rank_overlap_constant=0.1,
+    #         )
+    #     print("\n")
+    # print("\n\n")
+    
+    # print("**************************************")
+    # print("Testing re-rank-overlap constant")
+    # print("**************************************")
+    # re_rank_overlap_constant = [
+    #     100,
+    #     # 200,
+    #     # 300,
+    #     # 400,
+    #     # 500,
+    #     ]
+    # for c in re_rank_overlap_constant:
+    #     print(f"Running evaluation with re-rank-overlap constant ={c}")
+    #     main(
+    #         re_rank_heuristic_constant=0.2,
+    #         re_rank_overlap_constant=c
+    #         )
+    #     print("\n\n\n")
+    # print(f"Ending script at {datetime.now()}")
+
+    print("**************************************")
+    print("Testing optimised re-rank-overlap and re-rank-heuristic constant together")
+    print("**************************************")
+    re_rank_heuristic_constants = 10
+    re_rank_overlap_constant = 100
+    main(re_rank_overlap_constant=re_rank_overlap_constant, re_rank_heuristic_constant=re_rank_heuristic_constants)
+    print("\n\n\n")

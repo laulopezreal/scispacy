@@ -60,14 +60,14 @@ fasttext_model = None
 def load_fasttext():
     """ Load FastText model once into memory. """
     global fasttext_model
-    model_path = "data/models/fasttext/fasttext.model"
+    model_path = "/home/kgvz782/projects/scispacy/data/models/fasttext/fasttext.model"
 
     if fasttext_model is None:
         if os.path.exists(model_path):
             print(f"✅ Loading cached FastText model from {model_path}")
             fasttext_model = KeyedVectors.load(model_path, mmap='r')
         else:
-            print(f"⚡ Loading FastText vectors from raw file...")
+            print(f"⚡ Loading FastText vectors from raw file...")            
             fasttext_model = KeyedVectors.load_word2vec_format(
                 "data/models/fasttext/cc.en.300.vec", binary=False
             )

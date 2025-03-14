@@ -7,6 +7,7 @@ import datetime
 from collections import defaultdict
 import numpy as np
 
+import re
 import bm25s
 # import torch
 from txtai.pipeline import Tokenizer
@@ -55,7 +56,7 @@ class LinkerPaths(NamedTuple):
     tfidf_vectors: str
     concept_aliases_list: str
 
-# UmlsLinkerPaths = LinkerPaths(
+# UmlsLinkerPaths = LinkerPaths(w
 #     ann_index="https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/data/linkers/2023-04-23/umls/nmslib_index.bin",  # noqa
 #     tfidf_vectorizer="https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/data/linkers/2023-04-23/umls/tfidf_vectorizer.joblib",  # noqa
 #     tfidf_vectors="https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/data/linkers/2023-04-23/umls/tfidf_vectors_sparse.npz",  # noqa
@@ -64,10 +65,10 @@ class LinkerPaths(NamedTuple):
 
 # Test generated artifacts
 UmlsLinkerPaths = LinkerPaths(
-    index=f"output/{SUBFOLDER}/",  # noqa
-    tfidf_vectorizer=f"output/{SUBFOLDER}/tfidf_vectorizer.joblib",  # noqa
-    tfidf_vectors=f"output/{SUBFOLDER}/tfidf_vectors_sparse.npz",  # noqa
-    concept_aliases_list=f"output/{SUBFOLDER}/concept_aliases.json",  # noqa
+    index=f"/home/kgvz782/projects/scispacy/output/{SUBFOLDER}/",  # noqa
+    tfidf_vectorizer=f"/home/kgvz782/projects/scispacy/output/{SUBFOLDER}/tfidf_vectorizer.joblib",  # noqa
+    tfidf_vectors=f"/home/kgvz782/projects/scispacy/output/{SUBFOLDER}/tfidf_vectors_sparse.npz",  # noqa
+    concept_aliases_list=f"/home/kgvz782/projects/scispacy/output/{SUBFOLDER}/concept_aliases.json",  # noqa
 )
 
 MeshLinkerPaths = LinkerPaths(
@@ -400,8 +401,15 @@ class CandidateGenerator:
         #     batch_mention_candidates.append(mention_candidates)
 
         # return batch_mention_candidates
-    def __call__(self, mention_texts: List[str], alpha, k: int = 20, ) -> List[List[MentionCandidate]]:
-
+    def __call__(
+        self, 
+        re_rank_overlap_constant: float,
+        re_rank_heuristic_constant: float,
+        mention_texts: List[str], 
+        alpha: float = 0.2, 
+        k: int = 20, 
+        ) -> List[List[MentionCandidate]]:
+        
         if self.verbose:
             print(f"Generating candidates for {len(mention_texts)} mentions")
 
@@ -495,7 +503,12 @@ class CandidateGenerator:
             ]
             
             # (4) Apply your custom heuristic re-ranker
-            mention_candidates = re_rank_combo(mention, mention_candidates)
+            mention_candidates = re_rank_combo(
+                mention, 
+                mention_candidates, 
+                re_rank_overlap_constant,
+                re_rank_heuristic_constant,
+                )
             batch_mention_candidates.append(mention_candidates)            
 
         end_time = datetime.datetime.now()
@@ -525,7 +538,6 @@ class CandidateGenerator:
         vector = get_embedding(text_key)
         self.embedding_cache[text_key] = vector
         return vector
-
 
     def load_faiss_index(self) -> faiss.Index:
         """
@@ -561,14 +573,14 @@ class CandidateGenerator:
         print(f"🔄 FAISS index contains {faiss_index.ntotal} vectors")
         return faiss_index
     
-def re_rank_combo(mention_text, candidates):
+def re_rank_combo(mention_text, candidates, re_rank_overlap_constant, re_rank_heuristic_constant):
     # Step 1: exact-match re-rank
-    candidates = re_rank_heuristic(mention_text, candidates)
+    candidates = re_rank_heuristic(mention_text, candidates, re_rank_heuristic_constant)
     # Step 2: apply overlap re-rank
-    candidates = re_rank_overlap(mention_text, candidates)
+    candidates = re_rank_overlap(mention_text, candidates, re_rank_overlap_constant)
     return candidates
 
-def re_rank_heuristic(mention_text: str, candidates: List[MentionCandidate]) -> List[MentionCandidate]:
+def re_rank_heuristic(mention_text: str, candidates: List[MentionCandidate], constant: float,  verbose: bool = False) -> List[MentionCandidate]:
     # Normalize mention text
     mention_norm = mention_text.strip().lower()
 
@@ -582,13 +594,21 @@ def re_rank_heuristic(mention_text: str, candidates: List[MentionCandidate]) -> 
 
         # Check if EXACT match in any of the aliases
         # (You might apply .lower() to candidate alias too)
-        alias_match = any(mention_norm == alias.strip().lower() for alias in candidate.aliases)
+        alias_match = any(mention_norm.strip().lower() == alias.strip().lower() for alias in candidate.aliases)
 
         # If exact alias match, we boost score
         if alias_match:
-            boosted_score = base_score + 2.0  # or some other constant
+            boosted_score = base_score + constant  # or some other constant
         else:
             boosted_score = base_score
+        
+         # 1) DEBUG PRINT
+        # For clarity, show candidate.concept_id or candidate.aliases plus the old base_score + new boosted_score
+        if verbose:
+            print(f"[Heuristic] mention='{mention_text}', concept_id='{candidate.concept_id}', "
+              f"aliases={candidate.aliases}, base_score={base_score:.3f}, exactMatch={alias_match}, "
+              f"boosted_score={boosted_score:.3f}")
+
 
         candidate_scores.append((candidate, boosted_score))
 
@@ -598,9 +618,7 @@ def re_rank_heuristic(mention_text: str, candidates: List[MentionCandidate]) -> 
     # Return the reordered candidates
     return [c for c, _ in candidate_scores]
 
-import re
-
-def re_rank_overlap(mention_text: str, candidates: List[MentionCandidate]) -> List[MentionCandidate]:
+def re_rank_overlap(mention_text: str, candidates: List[MentionCandidate], constant, verbose: bool = False) -> List[MentionCandidate]:
     # Tokenize mention & candidate aliases. 
     # For a simple approach, split by non-alphabetic characters:
     mention_tokens = re.findall(r"[a-z0-9]+", mention_text.lower())
@@ -620,7 +638,13 @@ def re_rank_overlap(mention_text: str, candidates: List[MentionCandidate]) -> Li
                 best_alias_overlap = overlap_count
 
         # We'll combine base_score + overlap_count, or any weighting you like
-        total_score = base_score + best_alias_overlap
+        total_score = base_score + constant * best_alias_overlap
+        
+        # 2) DEBUG PRINT
+        if verbose:
+            print(f"[Overlap] mention='{mention_text}', concept_id='{candidate.concept_id}', "
+                f"aliases={candidate.aliases}, base_score={base_score:.3f}, bestOverlap={best_alias_overlap}, "
+                f"final_score={total_score:.3f}")
         candidate_scores.append((candidate, total_score))
 
     # Sort in descending order of the combined score
