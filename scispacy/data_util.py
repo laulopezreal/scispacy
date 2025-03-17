@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Optional, NamedTuple, List, Iterator, Dict, Tuple
 import tarfile
 import atexit
@@ -152,28 +153,13 @@ def read_full_med_mentions(
     span_only: bool = False,
     spacy_format: bool = True,
     use_umls_ids: bool = False,
+    verbose: bool = False,
+    keep_files: bool = False,
 ):
     def _cleanup_dir(dir_path: str):
         if os.path.exists(dir_path):
             shutil.rmtree(dir_path)
-
-    resolved_directory_path = cached_path(directory_path)
-    print(f"The resolved directory path for the medical mentions is {resolved_directory_path}")
-    if "tar.gz" in resolved_directory_path: # If the path points to a tar.gz file
-        print(f"Extracting contents from compressed tar.gz file {resolved_directory_path}")
-        # Extract dataset to temp dir
-        tempdir = tempfile.mkdtemp()
-        print(
-            f"extracting dataset directory {resolved_directory_path} to temp dir {tempdir}"
-        )
-        with tarfile.open(resolved_directory_path, "r:gz") as archive:
-            archive.extractall(tempdir)
-        # Postpone cleanup until exit in case the unarchived
-        # contents are needed outside this function.
-        atexit.register(_cleanup_dir, tempdir)
-
-        resolved_directory_path = tempdir
-
+    
     expected_names = [
         "corpus_pubtator.txt",
         "corpus_pubtator_pmids_all.txt",
@@ -181,6 +167,37 @@ def read_full_med_mentions(
         "corpus_pubtator_pmids_test.txt",
         "corpus_pubtator_pmids_trng.txt",
     ]
+
+    resolved_directory_path = cached_path(directory_path)
+    parent_folder = Path(resolved_directory_path).parent
+    parent_directory_contents = os.listdir(parent_folder)
+    if verbose:
+        print(f"Parent folder contents are: {parent_directory_contents}")
+    if expected_names in parent_directory_contents:
+        resolved_directory_path = parent_folder
+        if verbose:
+            print(f"Reading files found at {resolved_directory_path}")
+
+    elif "tar.gz" in resolved_directory_path: # If the path points to a tar.gz file
+        if verbose:
+            print(f"The resolved directory path for the medical mentions is {resolved_directory_path}")
+            print(f"Extracting contents from compressed tar.gz file {resolved_directory_path}")
+        if not keep_files:
+            # Extract dataset to stemp dir
+            extractdir = tempfile.mkdtemp()
+            # Postpone cleanup until exit in case the unarchived
+            # contents are needed outside this function.
+            atexit.register(_cleanup_dir, extractdir)
+
+        else:
+            extractdir = parent_folder
+        if verbose:
+            print(
+                f"extracting dataset directory {resolved_directory_path} to temp dir {extractdir}"
+            )
+        with tarfile.open(resolved_directory_path, "r:gz") as archive:
+            archive.extractall(extractdir)
+        resolved_directory_path = extractdir
 
     corpus = os.path.join(resolved_directory_path, expected_names[0])
     examples = med_mentions_example_iterator(corpus)

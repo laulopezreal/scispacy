@@ -109,3 +109,4 @@ venv.bak/
 # Data
 data
 test_output
+output/
